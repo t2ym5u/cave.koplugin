@@ -35,7 +35,7 @@ function CaveBoardWidget:onTap(_, ges)
     if not (ges and ges.pos) then return false end
     local row, col = self:getCellFromPoint(ges.pos.x, ges.pos.y)
     if not row then return false end
-    if self.onCellTap then self:onCellTap(row, col) end
+    if self.onCellTap then self.onCellTap(row, col) end
     return true
 end
 
@@ -78,7 +78,7 @@ function CaveBoardWidget:paintTo(bb, x, y)
                 local face = self.number_face
                 local m    = RenderText:sizeUtf8Text(0, cew, face, txt, true, false)
                 local tx   = cx + math.floor((cew - m.x) / 2)
-                local ty   = cy + math.floor(ceh / 2) - math.floor((m.y_bottom - m.y_top) / 2) - m.y_top
+                local ty   = cy + math.floor((ceh + m.y_top - m.y_bottom) / 2)
                 RenderText:renderUtf8Text(bb, tx, ty, face, txt, true, false, Blitbuffer.COLOR_BLACK)
             elseif state == 1 then
                 -- User marked shaded
