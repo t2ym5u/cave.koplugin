@@ -16,7 +16,7 @@ local Size            = require("ui/size")
 local UIManager       = require("ui/uimanager")
 local VerticalGroup   = require("ui/widget/verticalgroup")
 local VerticalSpan    = require("ui/widget/verticalspan")
-local _               = require("gettext")
+local _               = require("i18n")
 local T               = require("ffi/util").template
 
 local ScreenBase      = require("screen_base")
@@ -183,8 +183,13 @@ function CaveScreen:onNewGame()
     self.board = CaveBoard:new{ n = n, difficulty = diff }
     self.board:generate(diff)
     self.plugin:saveState(self.board:serialize())
-    self.board_widget.board = self.board
-    self.board_widget:refresh()
+    if n ~= self.board_widget.cols then
+        self:buildLayout()
+        UIManager:setDirty(self, function() return "ui", self.dimen end)
+    else
+        self.board_widget.board = self.board
+        self.board_widget:refresh()
+    end
     self:updateStatus(_("New game started."))
 end
 
