@@ -3,5 +3,5 @@ return {
     name        = "cave",
     fullname    = _("Cave"),
     description = _("Find the cave hidden inside the grid"),
-    version     = "1.1.2",
+    version     = "1.1.3",
 }
