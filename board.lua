@@ -247,39 +247,37 @@ function CaveBoard:generate(difficulty)
             else
                 local nb = neighbors[math.random(#neighbors)]
                 local nr, nc = nb[1], nb[2]
-                -- Check no 2x2 would form if we un-shade this
-                local would_2x2 = false
-                -- Check all 2x2 blocks that include (nr, nc)
-                for dr = -1, 0 do
-                    for dc = -1, 0 do
-                        local r1, c1 = nr + dr, nc + dc
-                        local r2, c2 = r1 + 1, c1 + 1
-                        if r1 >= 1 and c1 >= 1 and r2 <= n and c2 <= n then
-                            local cnt2 = 0
-                            for _, pos in ipairs({{r1,c1},{r1,c2},{r2,c1},{r2,c2}}) do
-                                if pos[1] == nr and pos[2] == nc then
-                                    -- would be unshaded
-                                elseif shaded[pos[1]][pos[2]] then
-                                    cnt2 = cnt2 + 1
-                                end
-                            end
-                            -- If remaining 3 are all shaded, un-shading nr,nc doesn't create 2x2
-                            -- But if we need all 4 shaded for 2x2 to form, and nr,nc IS being unshaded,
-                            -- this won't be 2x2. We want to check if NOT including nr,nc gives a 2x2
-                            -- Actually we check the 2x2 that contains nr,nc after un-shading it
-                            -- = the 2x2 would be all shaded iff all other 3 are shaded. That's fine.
+                -- Un-shading a cell can only clear 2x2-shaded violations, never
+                -- create one, so no per-step check is needed here — the final
+                -- has2x2Shaded(shaded, n) check below (after excavation stops)
+                -- is what actually gates acceptance of the whole attempt.
+                shaded[nr][nc] = false
+                local k = vkey(nr, nc)
+                visited[k] = true
+                frontier[#frontier + 1] = {nr, nc}
+                unshaded_count = unshaded_count + 1
+            end
+        end
+
+        -- Repair pass: the random-walk excavation above rarely reaches every
+        -- interior cell (especially ones near a corner/edge, far from the
+        -- center start point), so 2x2-shaded violations against the border
+        -- ring are common at this point. Every such violation must include
+        -- at least one interior cell (the border ring is only 1 cell thick),
+        -- so unshading one interior cell per violating block always resolves
+        -- it; a single raster-order pass fixes all of them since unshading
+        -- only ever removes violations, never creates new ones.
+        for r = 1, n - 1 do
+            for c = 1, n - 1 do
+                if shaded[r][c] and shaded[r+1][c] and shaded[r][c+1] and shaded[r+1][c+1] then
+                    for _, pos in ipairs({{r,c},{r+1,c},{r,c+1},{r+1,c+1}}) do
+                        local pr, pc = pos[1], pos[2]
+                        if pr >= 2 and pr <= n-1 and pc >= 2 and pc <= n-1 then
+                            shaded[pr][pc] = false
+                            unshaded_count = unshaded_count + 1
+                            break
                         end
                     end
-                end
-                -- Only check existing 2x2 violations (not new ones from this excavation)
-                shaded[nr][nc] = false
-                if has2x2Shaded(shaded, n) then
-                    shaded[nr][nc] = true  -- revert
-                else
-                    local k = vkey(nr, nc)
-                    visited[k] = true
-                    frontier[#frontier + 1] = {nr, nc}
-                    unshaded_count = unshaded_count + 1
                 end
             end
         end
