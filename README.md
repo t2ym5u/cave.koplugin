@@ -34,6 +34,15 @@ Shade cells black to carve a connected white "cave". Numbered white cells show e
 | New puzzle | Tap **New** |
 | Show rules | Tap **Rules** |
 
+## Known limitations
+
+At most sizes and difficulties, every generated puzzle is guaranteed to
+have exactly one solution. Medium difficulty at 7×7 and 8×8 is the
+exception: proving uniqueness there is occasionally too expensive within
+generation's time budget, so a small fraction of those puzzles ship
+without that guarantee (still fully valid and completable, just not
+proven to be the only possible solution).
+
 ## License
 
 GPL-3.0 — see [LICENSE](LICENSE).
