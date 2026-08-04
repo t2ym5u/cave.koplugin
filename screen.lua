@@ -99,6 +99,9 @@ function CaveScreen:buildLayout()
         and math.max(math.floor(sw * 0.35), 100)
         or  math.floor(sw * 0.9)
 
+    self.status_text:setMaxWidth(is_landscape and button_width
+        or (self.board_widget.size + (Size.padding.large + Size.margin.default) * 2))
+
     local title_bar = self:buildTitleBar(_("Cave"), function()
         return {
             { text = _("New game"),            callback = function() self:onNewGame() end },
