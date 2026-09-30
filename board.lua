@@ -6,6 +6,7 @@
 --   4. Clue numbers = how many cells visible from that cell in 4 directions (incl. self).
 
 local grid_utils = require("grid_utils")
+local Hint      = require("hint")
 
 local SIZES = { 6, 7, 8 }
 
@@ -576,6 +577,13 @@ function CaveBoard:cycleCell(r, c)
     end
 end
 
+-- Like cycleCell(), but goes straight to a state. Used by the Hint button.
+function CaveBoard:setCellState(r, c, v)
+    if self.clues[r][c] then return false end
+    self.user[r][c] = v
+    return true
+end
+
 function CaveBoard:clearUser()
     local n = self.n
     for r = 1, n do
@@ -619,6 +627,19 @@ end
 -- ---------------------------------------------------------------------------
 -- Serialize / load
 -- ---------------------------------------------------------------------------
+
+-- Marking a cell "definitely clear" is optional (checkWin only looks at
+-- shading), so the solution reports non-shaded cells as empty and equals()
+-- compares shaded-ness.
+Hint.install(CaveBoard, {
+    getUser     = function(b, r, c) return b.user[r][c] end,
+    getSolution = function(b, r, c) return b.solution[r][c] and 1 or 0 end,
+    isEmpty     = function(v) return v == 0 end,
+    equals      = function(u, s) return (u == 1) == (s == 1) end,
+    isGiven     = function(b, r, c) return b.clues[r][c] == true end,
+    setCell     = function(b, r, c, v) return b:setCellState(r, c, v) end,
+    blank       = 0,
+})
 
 function CaveBoard:serialize()
     local n = self.n
