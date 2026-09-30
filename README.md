@@ -16,6 +16,7 @@ Shade cells black to carve a connected white "cave". Numbered white cells show e
 - **Three difficulty levels** — Easy, Medium, Hard
 - **Visibility lines** — see the line of sight from any numbered cell
 - **Check** — validates connectivity and visibility counts
+- **Hint** — two taps: the first says which cell is about to give, the second acts on it. A cell that contradicts the solution is always reported before a fresh one is revealed
 - **Auto-save** — puzzle state saved and restored on next launch
 
 ## Installation
