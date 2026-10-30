@@ -7,7 +7,6 @@ local function lrequire(name)
     return package.loaded[key]
 end
 
-local ButtonTable     = require("ui/widget/buttontable")
 local Device          = require("device")
 local FrameContainer  = require("ui/widget/container/framecontainer")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
@@ -81,26 +80,7 @@ end
 -- ---------------------------------------------------------------------------
 
 function CaveScreen:buildLayout()
-    local sw           = DeviceScreen:getWidth()
     local is_landscape = self:isLandscape()
-
-    self.board_widget = CaveBoardWidget:new{
-        board      = self.board,
-        onCellTap  = function(r, c) self:onCellTap(r, c) end,
-    }
-
-    local board_frame = FrameContainer:new{
-        padding = Size.padding.large,
-        margin  = Size.margin.default,
-        self.board_widget,
-    }
-
-    local button_width = is_landscape
-        and math.max(math.floor(sw * 0.35), 100)
-        or  math.floor(sw * 0.9)
-
-    self.status_text:setMaxWidth(is_landscape and button_width
-        or (self.board_widget.size + (Size.padding.large + Size.margin.default) * 2))
 
     local title_bar = self:buildTitleBar(_("Cave"), function()
         return {
@@ -111,38 +91,44 @@ function CaveScreen:buildLayout()
         }
     end)
 
-    local bottom_buttons = ButtonTable:new{
-        shrink_unneeded_width = true,
-        width   = button_width,
-        buttons = {{
-            { text = _("Check"),   callback = function() self:onCheck() end },
-            { text = _("Hint"), callback = function() self:onHint() end },
-            { text = _("Clear"),   callback = function() self:onClear() end },
-        }},
+    local controls_w = self:getControlsWidth()
+    self.status_text:setMaxWidth(controls_w)
+    local controls = VerticalGroup:new{
+        align = "center",
+        self.status_text,
+        VerticalSpan:new{ width = Size.span.vertical_large },
+        self:buildActionBar({
+            { text = _("Check"), callback = function() self:onCheck() end },
+            { text = _("Hint"),  callback = function() self:onHint() end },
+            { text = _("Clear"), callback = function() self:onClear() end },
+        }),
+    }
+
+    local frame_pad = Size.padding.large
+    local frame_extra = 2 * (frame_pad + Size.border.window)
+    local budget_w, budget_h = self:getBoardBudget(title_bar, controls)
+    self.board_widget = CaveBoardWidget:new{
+        board     = self.board,
+        max_size  = math.min(budget_w, budget_h) - frame_extra,
+        onCellTap = function(r, c) self:onCellTap(r, c) end,
+    }
+    local board_frame = FrameContainer:new{
+        padding = frame_pad,
+        margin  = 0,
+        self.board_widget,
     }
 
     if is_landscape then
-        local right_panel = VerticalGroup:new{
-            align = "center",
-            self.status_text,
-            VerticalSpan:new{ width = Size.span.vertical_large },
-            bottom_buttons,
-        }
         local content = HorizontalGroup:new{
-            align  = "center",
+            align = "center",
             board_frame,
-            HorizontalSpan:new{ width = Size.span.horizontal_default },
-            right_panel,
+            HorizontalSpan:new{ width = self:getGutter() },
+            controls,
         }
         self:buildLandscapeLayout(title_bar, content)
     else
-        local content = VerticalGroup:new{
-            align = "center",
-            board_frame,
-            VerticalSpan:new{ width = Size.span.vertical_large },
-            self.status_text,
-        }
-        self:buildPortraitLayout(title_bar, content, bottom_buttons)
+        self:buildPortraitLayout(title_bar, board_frame,
+            VerticalGroup:new{ align = "center", controls, VerticalSpan:new{ width = self:getGutter() } })
     end
     self:updateStatus()
 end
@@ -161,6 +147,11 @@ function CaveScreen:onCellTap(r, c)
     else
         self:updateStatus()
     end
+    self:refreshActionBar()
+end
+
+function CaveScreen:isRoundOver()
+    return self.board:checkWin()
 end
 
 -- ---------------------------------------------------------------------------
@@ -180,6 +171,7 @@ function CaveScreen:onNewGame()
         self.board_widget.board = self.board
         self.board_widget:refresh()
     end
+    self:refreshActionBar()
     self:updateStatus(_("New game started."))
 end
 
@@ -197,6 +189,7 @@ function CaveScreen:onClear()
     self.board:clearUser()
     self.board_widget:refresh()
     self.plugin:saveState(self.board:serialize())
+    self:refreshActionBar()
     self:updateStatus(_("Board cleared."))
 end
 
@@ -220,7 +213,7 @@ function CaveScreen:openSizeMenu()
         sizes[#sizes + 1] = { id = n, text = n .. "\xC3\x97" .. n }
     end
     MenuHelper.openSizeMenu{
-        title     = _("Select grid size"),
+        title     = _("Select size"),
         sizes     = sizes,
         current   = self.board.n,
         parent    = self,
@@ -247,13 +240,16 @@ end
 -- ---------------------------------------------------------------------------
 
 function CaveScreen:getSizeButtonText()
-    return T(_("Size: %1"), self.board.n)
+    return T(_("Size: %1"), T("%1×%2", self.board.n, self.board.n))
+end
+
+function CaveScreen:getDiffLabel()
+    local diff = self.plugin:getSetting("difficulty", "medium")
+    return MenuHelper.DIFFICULTY_LABELS[diff] or diff
 end
 
 function CaveScreen:getDiffButtonText()
-    local diff  = self.plugin:getSetting("difficulty", "medium")
-    local label = MenuHelper.DIFFICULTY_LABELS[diff] or diff
-    return T(_("Diff: %1"), label)
+    return T(_("Difficulty: %1"), self:getDiffLabel())
 end
 
 function CaveScreen:updateStatus(msg)
@@ -263,8 +259,10 @@ function CaveScreen:updateStatus(msg)
     elseif self.board:checkWin() then
         status = _("Solved!")
     else
-        local shaded = self.board:countShaded()
-        status = T(_("Shaded: %1"), shaded)
+        status = self:joinStatus(
+            T("%1×%1", self.board.n),
+            self:getDiffLabel(),
+            T(_("Shaded: %1"), self.board:countShaded()))
     end
     ScreenBase.updateStatus(self, status)
 end

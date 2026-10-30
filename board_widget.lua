@@ -103,9 +103,11 @@ function CaveBoardWidget:paintTo(bb, x, y)
     local gsize = self.size
 
     for i = 0, n do
-        local px = x + math.floor(i * cw)
-        local py = y + math.floor(i * ch)
         local lw = (i == 0 or i == n) and thick or thin
+        -- The closing line is drawn inside the grid, not past its edge.
+        local inset = (i == n) and lw or 0
+        local px = x + math.floor(i * cw) - inset
+        local py = y + math.floor(i * ch) - inset
         drawLine(bb, px, y,  lw, gsize, Blitbuffer.COLOR_BLACK)
         drawLine(bb, x,  py, gsize, lw, Blitbuffer.COLOR_BLACK)
     end
