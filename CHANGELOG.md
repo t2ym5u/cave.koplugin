@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-10-30
+
+### Changed
+- Redesigned play screen: the board fills the room the controls leave, with a
+  full-width Check/Hint/Clear bar.
+- The status line reads "7×7 · Medium · Shaded: 12" (it used to give only the
+  shaded count) and wraps in landscape.
+- Title-bar menu: "Size: 7×7" instead of "Size: 7", and "Difficulty: Medium"
+  instead of "Diff: Medium".
+- Once the cave is solved, the action bar shows "New game" in place of its
+  buttons.
+
+### Fixed
+- The closing right and bottom grid lines were drawn past the board's edge.
+- Digits overflowed their cells: game-common's font fit accepted every size,
+  then DPI scaled it up again. They now fit their cell on every screen.
+- An applied Hint no longer wipes the saved game (game-common saved it as
+  nil). When a hint fills the last cell, the status now shows the win message.
+
 ## [1.2.2] - 2026-10-07
 
 ### Fixed

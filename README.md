@@ -32,7 +32,7 @@ Shade cells black to carve a connected white "cave". Numbered white cells show e
 |--------|-----|
 | Shade / unshade a cell | Tap it |
 | Check progress | Tap **Check** |
-| New puzzle | Tap **New** |
+| New puzzle | Tap **New game** |
 | Show rules | Tap **Rules** |
 
 ## Known limitations
