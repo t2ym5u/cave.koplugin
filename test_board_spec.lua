@@ -174,4 +174,66 @@ describe("CaveBoard", function()
             assert.is_false(b:load({}))
         end)
     end)
+    describe("uniqueness check (1.5.0)", function()
+        local countSolutions
+        setup(function() countSolutions = require("board").countSolutions end)
+
+        -- A 2x2 shaded block completed by the cell being shaded used to slip
+        -- past the old backtracker, which counted 10 "solutions" here; only
+        -- 4 of them follow the rules.
+        it("does not count grids with a shaded 2x2 block", function()
+            local rows = {
+                ". . . . . .",
+                ". 4 . 6 7 .",
+                ". . . . 5 .",
+                ". . 5 . . .",
+                ". 3 . . . .",
+                ". . . . . .",
+            }
+            local clues = {}
+            for r, line in ipairs(rows) do
+                clues[r] = {}
+                local c = 0
+                for tok in line:gmatch("%S") do
+                    c = c + 1
+                    if tok ~= "." then clues[r][c] = tonumber(tok) end
+                end
+            end
+            local solutions, exhausted = countSolutions(clues, 6, 100, 1e6)
+            assert.is_false(exhausted)
+            assert.are.equal(4, solutions)
+        end)
+
+        it("every generated puzzle is unique, and generation is fast", function()
+            for _, n in ipairs({ 6, 7, 8 }) do
+                for _, diff in ipairs({ "easy", "medium", "hard" }) do
+                    local worst = 0
+                    for seed = 1, 10 do
+                        math.randomseed(seed * 7919 + n)
+                        local t0 = os.clock()
+                        local b = Board:new{ n = n }
+                        b:generate(diff)
+                        worst = math.max(worst, os.clock() - t0)
+                        local solutions, exhausted = countSolutions(b.clues, n, 2, 1e6)
+                        assert.is_false(exhausted)
+                        assert.are.equal(1, solutions,
+                            ("n=%d diff=%s seed=%d: not unique"):format(n, diff, seed))
+                    end
+                    -- ~30 ms worst on a desktop; generous for slow CI.
+                    assert.is_true(worst < 1.0, ("n=%d diff=%s took %.2fs"):format(n, diff, worst))
+                end
+            end
+        end)
+
+        it("reports progress while generating", function()
+            local calls, last = 0, 0
+            math.randomseed(7)
+            Board:new{ n = 8 }:generate("hard", function(f)
+                calls = calls + 1
+                assert.is_true(f >= last and f <= 1)
+                last = f
+            end)
+            assert.is_true(calls > 0)
+        end)
+    end)
 end)

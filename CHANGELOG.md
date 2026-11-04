@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-11-04
+
+### Changed
+- Much faster puzzle generation: an 8×8 Hard grid took up to 9 s on a
+  desktop (minutes on an e-reader); it now takes a few hundredths of a
+  second (about a second at worst on a Kobo). The uniqueness check now
+  deduces forced cells (clue rays, 2×2 blocks, connectivity) instead of
+  trying cell after cell.
+- A "Generating puzzle…" bar appears if generation still takes a moment
+  (needs game-common 1.12.0).
+
+### Fixed
+- The uniqueness check missed the 2×2 rule for the cell that completed the
+  block, so it counted some rule-breaking grids as extra solutions and
+  threw away puzzles that were in fact unique. Some puzzles therefore
+  differ from 1.4.x for the same seed (Daily Challenge included); every
+  puzzle is still checked to have exactly one solution.
+
 ## [1.4.3] - 2026-11-03
 
 ### Changed

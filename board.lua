@@ -181,190 +181,245 @@ end
 -- clues (all on cells known to be unshaded), is there only one shaded/
 -- unshaded assignment satisfying every rule (shaded connected + touches
 -- border, unshaded connected, no 2x2 shaded, every clue's visibility
--- count matches)? Backtracking over cells (clue cells forced unshaded
--- from the start), with two sound pruning rules applied after every
--- tentative decision:
---   - bidirectional future-connectivity: build the graph over cells
---     matching (want_shaded-or-undecided); every already-decided
---     want_shaded cell must lie in the same connected component of that
---     graph, checked for BOTH shaded and unshaded (mirrors numberlink's
---     per-color reachability check and tapa's connectivity fix
---     elsewhere in this audit) -- without this, plain backtracking is
---     far too slow (worst case 45s+ at n=8 even for the sanity check).
---   - per-clue visibility bounds: for each clue, compute the guaranteed-
---     minimum and maximum-possible visibility count given what's decided
---     so far (a ray still running into undecided territory could extend
---     anywhere up to the next decided-shaded cell or the boundary);
---     reject immediately if the clue's target falls outside that range.
---     This alone cut worst-case latency from ~8s to sub-100ms in testing.
--- Full validation (no 2x2 shaded, both regions connected, shaded touches
--- border, every clue matches exactly) is only checked once every cell is
--- decided.
+-- count matches)?
+--
+-- Backtracking with propagation to a fixpoint at every node (each rule
+-- below only ever forces what every solution extending the current
+-- partial grid must contain, so solutions are counted exactly):
+--   - per-clue ray bounds: a ray's length lies between its run of known-
+--     clear cells and the next known-shaded cell (or the edge). Against
+--     the clue's target, the other three rays' bounds give each ray a
+--     tighter [lo, hi]: its first lo cells must be clear, and once lo ==
+--     hi the cell right after must be shaded.
+--   - 2x2: a block with three shaded cells has its fourth clear.
+--   - connectivity, for both colours: cells that can no longer reach the
+--     colour's decided cells through (that colour or undecided) cells
+--     take the other colour; a decided cell cut off is a contradiction.
+-- The search branches on the cell right past a clue's known-clear run
+-- (the most constrained choice), else the first undecided cell. Cell
+-- state: 0 undecided, 1 shaded, 2 clear. node_budget counts search
+-- nodes, so a seed gives the same verdict on every device.
+-- 1.5.0: replaces a plain cell-by-cell backtracker that only checked the
+-- bounds (seconds at 8x8, minutes on an e-reader).
 -- ---------------------------------------------------------------------------
 
 local function countSolutions(clues, n, limit, node_budget)
+    local N = n * n
     local state = {}
-    for r = 1, n do state[r] = {} end
-    for r = 1, n do for c = 1, n do if clues[r][c] then state[r][c] = false end end end
+    for i = 1, N do state[i] = 0 end
 
-    local solutions, nodes, exhausted = 0, 0, false
-
-    local function has2x2ShadedAt(r, c)
-        for _, o in ipairs({ {0,0}, {0,-1}, {-1,0}, {-1,-1} }) do
-            local r0, c0 = r + o[1], c + o[2]
-            if r0 >= 1 and r0 <= n-1 and c0 >= 1 and c0 <= n-1 then
-                if state[r0][c0] == true and state[r0+1][c0] == true
-                    and state[r0][c0+1] == true and state[r0+1][c0+1] == true then
-                    return true
-                end
-            end
-        end
-        return false
-    end
-
-    local visited_stamp = {}
-    for r = 1, n do visited_stamp[r] = {} end
-    local stamp = 0
-    local queue = {}
-    local function regionOK(want_shaded)
-        stamp = stamp + 1
-        local start_r, start_c
-        local decided_count = 0
-        for r = 1, n do for c = 1, n do
-            if state[r][c] == want_shaded then
-                decided_count = decided_count + 1
-                if not start_r then start_r, start_c = r, c end
-            end
-        end end
-        if decided_count == 0 then return true end
-        local qh, qt = 1, 1
-        queue[1] = { start_r, start_c }
-        visited_stamp[start_r][start_c] = stamp
-        local found_decided = 1
-        while qh <= qt do
-            local cell = queue[qh]; qh = qh + 1
-            local r, c = cell[1], cell[2]
-            for _, d in ipairs(DIRS) do
-                local nr, nc = r + d[1], c + d[2]
-                if nr >= 1 and nr <= n and nc >= 1 and nc <= n and visited_stamp[nr][nc] ~= stamp then
-                    local v = state[nr][nc]
-                    if v == want_shaded or v == nil then
-                        visited_stamp[nr][nc] = stamp
-                        qt = qt + 1
-                        queue[qt] = { nr, nc }
-                        if v == want_shaded then found_decided = found_decided + 1 end
-                    end
-                end
-            end
-        end
-        return found_decided == decided_count
-    end
-
-    local clue_list = {}
-    for r = 1, n do for c = 1, n do if clues[r][c] then clue_list[#clue_list+1] = { r, c, clues[r][c] } end end end
-
-    local function cluesBoundsOK()
-        for _, cl in ipairs(clue_list) do
-            local r, c, target = cl[1], cl[2], cl[3]
-            local min_total, max_total = 1, 1
-            for _, d in ipairs(DIRS) do
-                local nr, nc = r + d[1], c + d[2]
-                local confirmed = 0
-                while nr >= 1 and nr <= n and nc >= 1 and nc <= n and state[nr][nc] == false do
-                    confirmed = confirmed + 1
-                    nr, nc = nr + d[1], nc + d[2]
-                end
-                min_total = min_total + confirmed
-                max_total = max_total + confirmed
-                if nr >= 1 and nr <= n and nc >= 1 and nc <= n and state[nr][nc] == nil then
-                    local extra = 0
-                    while nr >= 1 and nr <= n and nc >= 1 and nc <= n and state[nr][nc] ~= true do
-                        extra = extra + 1
-                        nr, nc = nr + d[1], nc + d[2]
-                    end
-                    max_total = max_total + extra
-                end
-            end
-            if target < min_total or target > max_total then return false end
-        end
-        return true
-    end
-
-    local function visibilityFinal(r, c)
-        local count = 1
+    -- Precomputed geometry: neighbours, 2x2 blocks, each clue's four rays.
+    local nbrs = {}
+    for r = 1, n do for c = 1, n do
+        local l = {}
         for _, d in ipairs(DIRS) do
             local nr, nc = r + d[1], c + d[2]
-            while nr >= 1 and nr <= n and nc >= 1 and nc <= n and not state[nr][nc] do
-                count = count + 1
-                nr, nc = nr + d[1], nc + d[2]
-            end
+            if nr >= 1 and nr <= n and nc >= 1 and nc <= n then l[#l + 1] = (nr - 1) * n + nc end
         end
-        return count
-    end
-    local function allCluesOKFinal()
-        for r = 1, n do for c = 1, n do
-            if clues[r][c] and visibilityFinal(r, c) ~= clues[r][c] then return false end
-        end end
+        nbrs[(r - 1) * n + c] = l
+    end end
+    local blocks = {}
+    for r = 1, n - 1 do for c = 1, n - 1 do
+        local i = (r - 1) * n + c
+        blocks[#blocks + 1] = { i, i + 1, i + n, i + n + 1 }
+    end end
+    local clue_list = {}
+    for r = 1, n do for c = 1, n do
+        if clues[r][c] then
+            local rays = {}
+            for k, d in ipairs(DIRS) do
+                local ray = {}
+                local nr, nc = r + d[1], c + d[2]
+                while nr >= 1 and nr <= n and nc >= 1 and nc <= n do
+                    ray[#ray + 1] = (nr - 1) * n + nc
+                    nr, nc = nr + d[1], nc + d[2]
+                end
+                rays[k] = ray
+            end
+            clue_list[#clue_list + 1] = { target = clues[r][c] - 1, rays = rays }
+            state[(r - 1) * n + c] = 2
+        end
+    end end
+
+    local trail, tn = {}, 0
+    local changed = false
+    -- Returns false on a contradiction.
+    local function set(i, v)
+        local s = state[i]
+        if s == v then return true end
+        if s ~= 0 then return false end
+        state[i] = v
+        tn = tn + 1; trail[tn] = i
+        changed = true
         return true
     end
-    local function touchesBorderFinal()
+    local function undo(mark)
+        while tn > mark do state[trail[tn]] = 0; trail[tn] = nil; tn = tn - 1 end
+    end
+
+    local conf, mx = { 0, 0, 0, 0 }, { 0, 0, 0, 0 }
+    local function cluesProp()
+        for _, cl in ipairs(clue_list) do
+            local rays, target = cl.rays, cl.target
+            local sum_min, sum_max = 0, 0
+            for k = 1, 4 do
+                local ray = rays[k]
+                local len, j = #ray, 1
+                while j <= len and state[ray[j]] == 2 do j = j + 1 end
+                local cf = j - 1
+                while j <= len and state[ray[j]] ~= 1 do j = j + 1 end
+                conf[k], mx[k] = cf, j - 1
+                sum_min, sum_max = sum_min + cf, sum_max + j - 1
+            end
+            if target < sum_min or target > sum_max then return false end
+            for k = 1, 4 do
+                local lo = target - (sum_max - mx[k])
+                local hi = target - (sum_min - conf[k])
+                if lo < conf[k] then lo = conf[k] end
+                if hi > mx[k] then hi = mx[k] end
+                if lo > hi then return false end
+                local ray = rays[k]
+                for j = conf[k] + 1, lo do
+                    if not set(ray[j], 2) then return false end
+                end
+                if lo == hi and ray[hi + 1] then
+                    if not set(ray[hi + 1], 1) then return false end
+                end
+            end
+        end
+        return true
+    end
+
+    local function blocksProp()
+        for _, b in ipairs(blocks) do
+            local shaded, free = 0, nil
+            for k = 1, 4 do
+                local s = state[b[k]]
+                if s == 1 then shaded = shaded + 1 elseif s == 0 then free = b[k] end
+            end
+            if shaded == 4 then return false end
+            if shaded == 3 and free then
+                if not set(free, 2) then return false end
+            end
+        end
+        return true
+    end
+
+    local seen, stamp, queue = {}, 0, {}
+    for i = 1, N do seen[i] = 0 end
+    local function regionProp(want)
+        local start, decided = nil, 0
+        for i = 1, N do
+            if state[i] == want then
+                decided = decided + 1
+                if not start then start = i end
+            end
+        end
+        if decided == 0 then return true end
+        stamp = stamp + 1
+        local qh, qt = 1, 1
+        queue[1] = start
+        seen[start] = stamp
+        local found = 1
+        while qh <= qt do
+            local i = queue[qh]; qh = qh + 1
+            for _, j in ipairs(nbrs[i]) do
+                if seen[j] ~= stamp then
+                    local v = state[j]
+                    if v == want or v == 0 then
+                        seen[j] = stamp
+                        qt = qt + 1; queue[qt] = j
+                        if v == want then found = found + 1 end
+                    end
+                end
+            end
+        end
+        if found ~= decided then return false end
+        local other = 3 - want
+        for i = 1, N do
+            if state[i] == 0 and seen[i] ~= stamp then
+                if not set(i, other) then return false end
+            end
+        end
+        return true
+    end
+
+    local function propagate()
+        repeat
+            changed = false
+            if not cluesProp() or not blocksProp()
+                or not regionProp(1) or not regionProp(2) then
+                return false
+            end
+        until not changed
+        return true
+    end
+
+    local function pickCell()
+        for _, cl in ipairs(clue_list) do
+            for k = 1, 4 do
+                local ray = cl.rays[k]
+                local j = 1
+                while ray[j] and state[ray[j]] == 2 do j = j + 1 end
+                if ray[j] and state[ray[j]] == 0 then return ray[j] end
+            end
+        end
+        for i = 1, N do if state[i] == 0 then return i end end
+        return nil
+    end
+
+    -- A full grid that passed propagate() is connected in both colours,
+    -- has no shaded 2x2 and matches every clue; what is left to check is
+    -- that some cell is shaded and the shading touches the border.
+    local function finalOK()
         for r = 1, n do for c = 1, n do
-            if state[r][c] and (r == 1 or r == n or c == 1 or c == n) then return true end
+            if (r == 1 or r == n or c == 1 or c == n) and state[(r - 1) * n + c] == 1 then
+                return true
+            end
         end end
         return false
     end
-    local function hasBothFinal()
-        local sh, un = false, false
-        for r = 1, n do for c = 1, n do
-            if state[r][c] then sh = true else un = true end
-        end end
-        return sh and un
-    end
 
-    local cells = {}
-    for r = 1, n do for c = 1, n do if state[r][c] == nil then cells[#cells+1] = { r, c } end end end
-
-    local function search(idx)
-        if solutions >= limit or exhausted then return end
+    local solutions, nodes, exhausted = 0, 0, false
+    local function search()
         nodes = nodes + 1
         if nodes > node_budget then exhausted = true; return end
-        if idx > #cells then
-            if hasBothFinal() and touchesBorderFinal() and allCluesOKFinal() then
-                solutions = solutions + 1
-            end
+        if not propagate() then return end
+        local i = pickCell()
+        if not i then
+            if finalOK() then solutions = solutions + 1 end
             return
         end
-        local r, c = cells[idx][1], cells[idx][2]
-        for _, val in ipairs({ false, true }) do
-            local ok = true
-            if val == true and has2x2ShadedAt(r, c) then ok = false end
-            if ok then
-                state[r][c] = val
-                if not (cluesBoundsOK() and regionOK(true) and regionOK(false)) then ok = false end
-                if ok then search(idx + 1) end
-                state[r][c] = nil
-            end
-            if solutions >= limit or exhausted then break end
+        for v = 2, 1, -1 do
+            local mark = tn
+            set(i, v)
+            search()
+            undo(mark)
+            if solutions >= limit or exhausted then return end
         end
     end
-    search(1)
-    return solutions, exhausted
+    search()
+    return solutions, exhausted, nodes
 end
 
 local REVEAL_LEVELS = { 1.0, 1.3, 1.6, 100.0 } -- multipliers on the nominal keep_clues ratio (last reveals every unshaded cell)
 
-local function nodeBudgetFor(n)
-    if n <= 6 then return 100000 end
-    if n <= 7 then return 150000 end
-    return 60000
-end
+-- Search nodes allowed per uniqueness check; running out counts as "not
+-- unique" and the generator moves on. With propagation a unique clue set
+-- is proved in under 200 nodes at every size (measured on 900 puzzles),
+-- while a non-unique one can wander for tens of thousands before its
+-- second solution turns up, so a small budget only cuts those short.
+local NODE_BUDGET = 500
 
 -- ---------------------------------------------------------------------------
 -- Generate
 -- ---------------------------------------------------------------------------
 
-function CaveBoard:generate(difficulty)
+-- on_progress(fraction), optional: called after every uniqueness check
+-- (screen.lua wires it to the shared "Generating puzzle…" bar).
+function CaveBoard:generate(difficulty, on_progress)
     self.difficulty = difficulty or self.difficulty
+    local checks = 0
     local n = self.n
 
     local keep_clues
@@ -378,7 +433,7 @@ function CaveBoard:generate(difficulty)
 
     local max_attempts = 50
     local ok = false
-    local node_budget = nodeBudgetFor(n)
+    local node_budget = NODE_BUDGET
 
     local best_solution, best_clues
 
@@ -514,6 +569,8 @@ function CaveBoard:generate(difficulty)
                     end
 
                     local solutions, exhausted = countSolutions(candidate_clues, n, 2, node_budget)
+                    checks = checks + 1
+                    if on_progress then on_progress(checks / (checks + 3)) end
                     if solutions == 1 and not exhausted then
                         for r = 1, n do
                             for c = 1, n do self.clues[r][c] = candidate_clues[r][c] end
@@ -680,6 +737,7 @@ function CaveBoard:load(data)
 end
 
 return {
-    CaveBoard = CaveBoard,
-    SIZES     = SIZES,
+    CaveBoard      = CaveBoard,
+    SIZES          = SIZES,
+    countSolutions = countSolutions, -- exposed for the specs
 }
