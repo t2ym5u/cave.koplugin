@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.1] - 2026-11-04
+
+### Fixed
+- Two-digit clues (10 and more, possible from 6×6) spilled over the cell's
+  left edge: the number size is now chosen for the widest clue on the board.
+- README screenshot regenerated from the current generator (the old one
+  still showed the always-black border of 1.5.x).
+
+### Changed
+- Uses less memory: the game loads when you open it, not when KOReader
+  starts, so it no longer takes memory or startup time while unplayed.
+
 ## [1.6.0] - 2026-11-04
 
 ### Changed
@@ -97,7 +109,6 @@ All notable changes to this project will be documented in this file.
   KOReader's `gettext`, which knows nothing of this plugin's strings, so the
   menu label stayed English while the game's own screen, which goes through
   `i18n`, was translated. `_` now comes from `i18n` here too.
-
 
 ## [1.2.1] - 2026-10-01
 

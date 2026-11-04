@@ -18,6 +18,16 @@ function CaveBoardWidget:init()
     local n   = self.board.n
     self.cols = n
     self.rows = n
+    -- A clue counts the cells it sees, up to 2n-1, so from 6x6 it can reach
+    -- two digits: size the font for the widest clue on this board, or "10"
+    -- spills over the cell's left edge.
+    local max_clue = 9
+    for r = 1, n do
+        for c = 1, n do
+            max_clue = math.max(max_clue, self.board.clues[r][c] or 0)
+        end
+    end
+    self.max_value = max_clue
     GridWidgetBase.init(self)
 
     -- Override gesture events so the range covers our paint_rect
