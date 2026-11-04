@@ -174,14 +174,17 @@ describe("CaveBoard", function()
             assert.is_false(b:load({}))
         end)
     end)
-    describe("uniqueness check (1.5.0)", function()
+    describe("uniqueness check and difficulty (1.6.0)", function()
         local countSolutions
         setup(function() countSolutions = require("board").countSolutions end)
 
         -- A 2x2 shaded block completed by the cell being shaded used to slip
-        -- past the old backtracker, which counted 10 "solutions" here; only
-        -- 4 of them follow the rules.
-        it("does not count grids with a shaded 2x2 block", function()
+        -- past the old backtracker (1.4.x). 1.6.0 counts with the rules as
+        -- the Rules screen states them (shaded cells may form several
+        -- groups, each touching the edge), which allows 150 grids here; the
+        -- independent counter in spec/solvability_audits/
+        -- cave_solvability_check.lua agrees.
+        it("counts the known example exactly", function()
             local rows = {
                 ". . . . . .",
                 ". 4 . 6 7 .",
@@ -199,30 +202,151 @@ describe("CaveBoard", function()
                     if tok ~= "." then clues[r][c] = tonumber(tok) end
                 end
             end
-            local solutions, exhausted = countSolutions(clues, 6, 100, 1e6)
+            local solutions, exhausted = countSolutions(clues, 6, 1000, 1e6)
             assert.is_false(exhausted)
-            assert.are.equal(4, solutions)
+            assert.are.equal(150, solutions)
         end)
 
-        it("every generated puzzle is unique, and generation is fast", function()
+        -- Brute force over every 4x4 grid, checking the stated rules
+        -- directly: no shaded 2x2, clear cells connected, every shaded cell
+        -- reaching the edge through shaded cells, clues match.
+        it("matches a brute-force count on 4x4 grids", function()
+            local n = 4
+            local function vis(g, r, c)
+                local k = 1
+                for _, d in ipairs({ { 0, 1 }, { 0, -1 }, { 1, 0 }, { -1, 0 } }) do
+                    local nr, nc = r + d[1], c + d[2]
+                    while nr >= 1 and nr <= n and nc >= 1 and nc <= n and not g[nr][nc] do
+                        k = k + 1; nr, nc = nr + d[1], nc + d[2]
+                    end
+                end
+                return k
+            end
+            local function valid(g)
+                for r = 1, n - 1 do for c = 1, n - 1 do
+                    if g[r][c] and g[r + 1][c] and g[r][c + 1] and g[r + 1][c + 1] then return false end
+                end end
+                if not isConnected(function(r, c) return not g[r][c] end, n) then return false end
+                -- shaded reach the edge: flood from shaded border cells
+                local seen, stack = {}, {}
+                for r = 1, n do seen[r] = {} end
+                for r = 1, n do for c = 1, n do
+                    if g[r][c] and (r == 1 or r == n or c == 1 or c == n) then
+                        seen[r][c] = true; stack[#stack + 1] = { r, c }
+                    end
+                end end
+                while #stack > 0 do
+                    local cell = table.remove(stack)
+                    for _, d in ipairs({ { 0, 1 }, { 0, -1 }, { 1, 0 }, { -1, 0 } }) do
+                        local nr, nc = cell[1] + d[1], cell[2] + d[2]
+                        if nr >= 1 and nr <= n and nc >= 1 and nc <= n and g[nr][nc] and not seen[nr][nc] then
+                            seen[nr][nc] = true; stack[#stack + 1] = { nr, nc }
+                        end
+                    end
+                end
+                for r = 1, n do for c = 1, n do
+                    if g[r][c] and not seen[r][c] then return false end
+                end end
+                return true
+            end
+            local grids = {}
+            for mask = 0, 2 ^ (n * n) - 1 do
+                local g, m = {}, mask
+                for r = 1, n do
+                    g[r] = {}
+                    for c = 1, n do g[r][c] = (m % 2 == 1); m = math.floor(m / 2) end
+                end
+                if valid(g) then grids[#grids + 1] = g end
+            end
+            math.randomseed(3)
+            for _ = 1, 12 do
+                local sol = grids[math.random(#grids)]
+                local clues = {}
+                for r = 1, n do clues[r] = {} end
+                for _ = 1, math.random(1, 3) do
+                    local r, c = math.random(n), math.random(n)
+                    if not sol[r][c] then clues[r][c] = vis(sol, r, c) end
+                end
+                local expect = 0
+                for _, g in ipairs(grids) do
+                    local fits = true
+                    for r = 1, n do for c = 1, n do
+                        if clues[r][c] and (g[r][c] or vis(g, r, c) ~= clues[r][c]) then fits = false end
+                    end end
+                    if fits then expect = expect + 1 end
+                end
+                local got, exhausted = countSolutions(clues, n, 1e6, 1e7)
+                assert.is_false(exhausted)
+                assert.are.equal(expect, got)
+            end
+        end)
+
+        -- 1.6.0: every puzzle is proven unique by the no-guessing deduction
+        -- solver at its level's tier (and re-checked by the counter), Hard
+        -- leaves clearly fewer numbers than Medium, Medium fewer than Easy,
+        -- and the worst generation stays well under a second on a Kobo
+        -- (~25x a desktop; measured ~25 ms worst here).
+        it("every puzzle is unique and solvable without guessing; levels differ; fast", function()
+            local deduce, LEVELS = require("board").deduce, require("board").LEVELS
             for _, n in ipairs({ 6, 7, 8 }) do
+                local ratio = {}
                 for _, diff in ipairs({ "easy", "medium", "hard" }) do
-                    local worst = 0
-                    for seed = 1, 10 do
+                    local worst, clues_sum, clear_sum = 0, 0, 0
+                    for seed = 1, 30 do
                         math.randomseed(seed * 7919 + n)
                         local t0 = os.clock()
                         local b = Board:new{ n = n }
                         b:generate(diff)
                         worst = math.max(worst, os.clock() - t0)
+                        local k, clear = 0, 0
+                        for r = 1, n do for c = 1, n do
+                            if b.clues[r][c] then k = k + 1 end
+                            if not b.solution[r][c] then clear = clear + 1 end
+                        end end
+                        assert.is_true(clear >= n and k < clear,
+                            ("n=%d diff=%s seed=%d: degenerate (%d clues, %d clear)"):format(n, diff, seed, k, clear))
+                        clues_sum, clear_sum = clues_sum + k, clear_sum + clear
+                        assert.is_true(deduce(b.clues, n, LEVELS[diff].tier),
+                            ("n=%d diff=%s seed=%d: needs guessing"):format(n, diff, seed))
                         local solutions, exhausted = countSolutions(b.clues, n, 2, 1e6)
                         assert.is_false(exhausted)
                         assert.are.equal(1, solutions,
                             ("n=%d diff=%s seed=%d: not unique"):format(n, diff, seed))
                     end
-                    -- ~30 ms worst on a desktop; generous for slow CI.
-                    assert.is_true(worst < 1.0, ("n=%d diff=%s took %.2fs"):format(n, diff, worst))
+                    ratio[diff] = clues_sum / clear_sum
+                    assert.is_true(worst < 0.25, ("n=%d diff=%s took %.2fs"):format(n, diff, worst))
+                end
+                assert.is_true(ratio.easy > ratio.medium + 0.1,
+                    ("n=%d: easy %.2f vs medium %.2f"):format(n, ratio.easy, ratio.medium))
+                assert.is_true(ratio.medium > ratio.hard + 0.05,
+                    ("n=%d: medium %.2f vs hard %.2f"):format(n, ratio.medium, ratio.hard))
+            end
+        end)
+
+        it("Easy and Medium never need the bottleneck rule", function()
+            local deduce = require("board").deduce
+            for _, n in ipairs({ 6, 7, 8 }) do
+                for _, diff in ipairs({ "easy", "medium" }) do
+                    for seed = 1, 10 do
+                        math.randomseed(seed * 31 + n)
+                        local b = Board:new{ n = n }
+                        b:generate(diff)
+                        local ok, stats = deduce(b.clues, n, 1)
+                        assert.is_true(ok)
+                        assert.are.equal(0, stats.uses[3])
+                    end
                 end
             end
+        end)
+
+        it("same seed gives the same puzzle", function()
+            local function gen()
+                math.randomseed(2026)
+                local b = Board:new{ n = 8 }
+                b:generate("hard")
+                return b:serialize()
+            end
+            assert.are.same(gen(), gen())
         end)
 
         it("reports progress while generating", function()

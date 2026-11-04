@@ -179,9 +179,10 @@ end
 -- Uniqueness counter. checkWin() is a literal full-grid comparison to
 -- self.solution -- uniqueness means: given only the revealed visibility
 -- clues (all on cells known to be unshaded), is there only one shaded/
--- unshaded assignment satisfying every rule (shaded connected + touches
--- border, unshaded connected, no 2x2 shaded, every clue's visibility
--- count matches)?
+-- unshaded assignment satisfying every rule as the Rules screen states
+-- them (every shaded cell reaches the grid edge through shaded cells,
+-- unshaded connected, no 2x2 shaded, every clue's visibility count
+-- matches)?
 --
 -- Backtracking with propagation to a fixpoint at every node (each rule
 -- below only ever forces what every solution extending the current
@@ -195,6 +196,10 @@ end
 --   - connectivity, for both colours: cells that can no longer reach the
 --     colour's decided cells through (that colour or undecided) cells
 --     take the other colour; a decided cell cut off is a contradiction.
+--     The area beyond the edge counts as one extra shaded cell next to
+--     every border cell (1.6.0: before, the shaded cells had to form a
+--     single group, stricter than the rules a player is given, so a grid
+--     with two shaded groups each touching the edge was never counted).
 -- The search branches on the cell right past a clue's known-clear run
 -- (the most constrained choice), else the first undecided cell. Cell
 -- state: 0 undecided, 1 shaded, 2 clear. node_budget counts search
@@ -205,6 +210,7 @@ end
 
 local function countSolutions(clues, n, limit, node_budget)
     local N = n * n
+    local OUT = N + 1
     local state = {}
     for i = 1, N do state[i] = 0 end
 
@@ -216,8 +222,18 @@ local function countSolutions(clues, n, limit, node_budget)
             local nr, nc = r + d[1], c + d[2]
             if nr >= 1 and nr <= n and nc >= 1 and nc <= n then l[#l + 1] = (nr - 1) * n + nc end
         end
+        if r == 1 or r == n or c == 1 or c == n then l[#l + 1] = OUT end
         nbrs[(r - 1) * n + c] = l
     end end
+    -- OUT stands for everything beyond the grid edge: always shaded and
+    -- next to every border cell, so "every shaded cell reaches the edge"
+    -- becomes "shaded cells and OUT form one connected group".
+    local out = {}
+    for r = 1, n do for c = 1, n do
+        if r == 1 or r == n or c == 1 or c == n then out[#out + 1] = (r - 1) * n + c end
+    end end
+    nbrs[OUT] = out
+    state[OUT] = 1
     local blocks = {}
     for r = 1, n - 1 do for c = 1, n - 1 do
         local i = (r - 1) * n + c
@@ -306,13 +322,13 @@ local function countSolutions(clues, n, limit, node_budget)
     end
 
     local seen, stamp, queue = {}, 0, {}
-    for i = 1, N do seen[i] = 0 end
+    for i = 1, OUT do seen[i] = 0 end
     local function regionProp(want)
         local start, decided = nil, 0
-        for i = 1, N do
+        for i = OUT, 1, -1 do
             if state[i] == want then
                 decided = decided + 1
-                if not start then start = i end
+                start = i
             end
         end
         if decided == 0 then return true end
@@ -368,18 +384,6 @@ local function countSolutions(clues, n, limit, node_budget)
         return nil
     end
 
-    -- A full grid that passed propagate() is connected in both colours,
-    -- has no shaded 2x2 and matches every clue; what is left to check is
-    -- that some cell is shaded and the shading touches the border.
-    local function finalOK()
-        for r = 1, n do for c = 1, n do
-            if (r == 1 or r == n or c == 1 or c == n) and state[(r - 1) * n + c] == 1 then
-                return true
-            end
-        end end
-        return false
-    end
-
     local solutions, nodes, exhausted = 0, 0, false
     local function search()
         nodes = nodes + 1
@@ -387,7 +391,8 @@ local function countSolutions(clues, n, limit, node_budget)
         if not propagate() then return end
         local i = pickCell()
         if not i then
-            if finalOK() then solutions = solutions + 1 end
+            -- A full grid that passed propagate() follows every rule.
+            solutions = solutions + 1
             return
         end
         for v = 2, 1, -1 do
@@ -402,218 +407,379 @@ local function countSolutions(clues, n, limit, node_budget)
     return solutions, exhausted, nodes
 end
 
-local REVEAL_LEVELS = { 1.0, 1.3, 1.6, 100.0 } -- multipliers on the nominal keep_clues ratio (last reveals every unshaded cell)
+-- ---------------------------------------------------------------------------
+-- Deduction solver (1.6.0). Applies only the rules a player uses on paper,
+-- never "suppose this cell is shaded and look for a contradiction"; each
+-- rule only marks what every valid grid must contain, so a grid it fills
+-- in completely has exactly one solution. The generator uses it both to
+-- prove uniqueness and to grade difficulty.
+--   tier 1  clue rays (how far each clue can and must see), 2x2 blocks
+--           (three shaded cells force the fourth clear) and walled-off
+--           cells (a cell that can no longer reach the rest of its colour
+--           takes the other one)
+--   tier 2  + bottlenecks: a cell whose shading would split the clear
+--           cells (or whose clearing would split the shaded ones) keeps
+--           its colour
+-- Cheaper rules run first; a rule is only tried when the ones before it
+-- are stuck. Returns solved, stats: stats.uses = { rays, walls, necks }
+-- counts the cells each rule decided, stats.rounds the number of passes.
+-- ---------------------------------------------------------------------------
 
--- Search nodes allowed per uniqueness check; running out counts as "not
--- unique" and the generator moves on. With propagation a unique clue set
--- is proved in under 200 nodes at every size (measured on 900 puzzles),
--- while a non-unique one can wander for tens of thousands before its
--- second solution turns up, so a small budget only cuts those short.
-local NODE_BUDGET = 500
+local function deduce(clues, n, tier)
+    local N = n * n
+    local OUT = N + 1
+    local state = {}
+    for i = 1, N do state[i] = 0 end
+
+    local nbrs = {}
+    for r = 1, n do for c = 1, n do
+        local l = {}
+        for _, d in ipairs(DIRS) do
+            local nr, nc = r + d[1], c + d[2]
+            if nr >= 1 and nr <= n and nc >= 1 and nc <= n then l[#l + 1] = (nr - 1) * n + nc end
+        end
+        if r == 1 or r == n or c == 1 or c == n then l[#l + 1] = OUT end
+        nbrs[(r - 1) * n + c] = l
+    end end
+    -- OUT stands for everything beyond the grid edge: always shaded and
+    -- next to every border cell, so "every shaded cell reaches the edge"
+    -- becomes "shaded cells and OUT form one connected group".
+    local out = {}
+    for r = 1, n do for c = 1, n do
+        if r == 1 or r == n or c == 1 or c == n then out[#out + 1] = (r - 1) * n + c end
+    end end
+    nbrs[OUT] = out
+    state[OUT] = 1
+    local blocks = {}
+    for r = 1, n - 1 do for c = 1, n - 1 do
+        local i = (r - 1) * n + c
+        blocks[#blocks + 1] = { i, i + 1, i + n, i + n + 1 }
+    end end
+    local clue_list = {}
+    for r = 1, n do for c = 1, n do
+        if clues[r][c] then
+            local rays = {}
+            for k, d in ipairs(DIRS) do
+                local ray = {}
+                local nr, nc = r + d[1], c + d[2]
+                while nr >= 1 and nr <= n and nc >= 1 and nc <= n do
+                    ray[#ray + 1] = (nr - 1) * n + nc
+                    nr, nc = nr + d[1], nc + d[2]
+                end
+                rays[k] = ray
+            end
+            clue_list[#clue_list + 1] = { target = clues[r][c] - 1, rays = rays }
+            state[(r - 1) * n + c] = 2
+        end
+    end end
+
+    local changed, bad = 0, false
+    local function set(i, v)
+        local s = state[i]
+        if s == v then return end
+        if s ~= 0 then bad = true; return end
+        state[i] = v
+        changed = changed + 1
+    end
+
+    local conf, mx = { 0, 0, 0, 0 }, { 0, 0, 0, 0 }
+    local function cluesProp()
+        for _, cl in ipairs(clue_list) do
+            local rays, target = cl.rays, cl.target
+            local sum_min, sum_max = 0, 0
+            for k = 1, 4 do
+                local ray = rays[k]
+                local len, j = #ray, 1
+                while j <= len and state[ray[j]] == 2 do j = j + 1 end
+                local cf = j - 1
+                while j <= len and state[ray[j]] ~= 1 do j = j + 1 end
+                conf[k], mx[k] = cf, j - 1
+                sum_min, sum_max = sum_min + cf, sum_max + j - 1
+            end
+            if target < sum_min or target > sum_max then bad = true; return end
+            for k = 1, 4 do
+                local lo = target - (sum_max - mx[k])
+                local hi = target - (sum_min - conf[k])
+                if lo < conf[k] then lo = conf[k] end
+                if hi > mx[k] then hi = mx[k] end
+                if lo > hi then bad = true; return end
+                local ray = rays[k]
+                for j = conf[k] + 1, lo do set(ray[j], 2) end
+                if lo == hi and ray[hi + 1] then set(ray[hi + 1], 1) end
+            end
+        end
+    end
+
+    local function blocksProp()
+        for _, b in ipairs(blocks) do
+            local shaded, free = 0, nil
+            for k = 1, 4 do
+                local s = state[b[k]]
+                if s == 1 then shaded = shaded + 1 elseif s == 0 then free = b[k] end
+            end
+            if shaded == 4 then bad = true; return end
+            if shaded == 3 and free then set(free, 2) end
+        end
+    end
+
+    local seen, stamp, queue = {}, 0, {}
+    for i = 1, OUT do seen[i] = 0 end
+    local function regionProp(want)
+        local start, decided = nil, 0
+        for i = OUT, 1, -1 do
+            if state[i] == want then
+                decided = decided + 1
+                start = i
+            end
+        end
+        if decided == 0 then return end
+        stamp = stamp + 1
+        local qh, qt = 1, 1
+        queue[1] = start
+        seen[start] = stamp
+        local found = 1
+        while qh <= qt do
+            local i = queue[qh]; qh = qh + 1
+            for _, j in ipairs(nbrs[i]) do
+                if seen[j] ~= stamp then
+                    local v = state[j]
+                    if v == want or v == 0 then
+                        seen[j] = stamp
+                        qt = qt + 1; queue[qt] = j
+                        if v == want then found = found + 1 end
+                    end
+                end
+            end
+        end
+        if found ~= decided then bad = true; return end
+        local other = 3 - want
+        for i = 1, N do
+            if state[i] == 0 and seen[i] ~= stamp then set(i, other) end
+        end
+    end
+
+    -- Bottlenecks: articulation points (Tarjan) of the want-or-undecided
+    -- graph, rooted at a decided cell. An undecided cell u cutting off a
+    -- subtree that holds a decided cell must take colour want (the root,
+    -- itself decided, is on the other side).
+    local disc, low, dsub, timer = {}, {}, {}, 0
+    local function articulation(want)
+        local root
+        for i = OUT, 1, -1 do if state[i] == want then root = i; break end end
+        if not root then return end
+        for i = 1, OUT do disc[i] = 0 end
+        timer = 0
+        local forced = {}
+        local function dfs(u)
+            timer = timer + 1
+            disc[u], low[u] = timer, timer
+            dsub[u] = (state[u] == want) and 1 or 0
+            for _, v in ipairs(nbrs[u]) do
+                local s = state[v]
+                if s == want or s == 0 then
+                    if disc[v] == 0 then
+                        dfs(v)
+                        dsub[u] = dsub[u] + dsub[v]
+                        if low[v] < low[u] then low[u] = low[v] end
+                        if state[u] == 0 and low[v] >= disc[u] and dsub[v] > 0 then
+                            forced[#forced + 1] = u
+                        end
+                    elseif disc[v] < low[u] then
+                        low[u] = disc[v]
+                    end
+                end
+            end
+        end
+        dfs(root)
+        for _, u in ipairs(forced) do set(u, want) end
+    end
+
+    local uses, rounds = { 0, 0, 0 }, 0
+    while true do
+        changed = 0
+        rounds = rounds + 1
+        cluesProp(); if bad then break end
+        blocksProp(); if bad then break end
+        if changed > 0 then
+            uses[1] = uses[1] + changed
+        else
+            regionProp(1); if bad then break end
+            regionProp(2); if bad then break end
+            if changed > 0 then
+                uses[2] = uses[2] + changed
+            elseif tier >= 2 then
+                articulation(2); if bad then break end
+                articulation(1); if bad then break end
+                if changed > 0 then uses[3] = uses[3] + changed end
+            end
+        end
+        if changed == 0 then break end
+    end
+    local stats = { uses = uses, rounds = rounds }
+    if bad then return false, stats end
+    for i = 1, N do if state[i] == 0 then return false, stats end end
+    return true, stats
+end
+
+-- Per difficulty: the deduction tier the player may need, the share of
+-- clear cells that stays numbered (digging stops there), and how many dig
+-- orders are tried (the sparsest result is kept). Hard digs as far as the
+-- bottleneck rule allows.
+local LEVELS = {
+    easy   = { tier = 1, floor = 0.80, tries = { 1, 1, 1 } },
+    medium = { tier = 1, floor = 0.60, tries = { 1, 1, 1 } },
+    hard   = { tier = 2, floor = 0.0,  tries = { 8, 5, 3 } }, -- per size 6, 7, 8
+
+}
 
 -- ---------------------------------------------------------------------------
 -- Generate
 -- ---------------------------------------------------------------------------
 
--- on_progress(fraction), optional: called after every uniqueness check
+-- Random cave shape (1.6.0): the cave grows one cell at a time from the
+-- centre, border included; a cell is only dug out if the shaded cells
+-- stay one connected group touching the edge (digging more never
+-- reconnects them, so a refused cell stays refused). Once the target size
+-- is reached it keeps growing only to open shaded 2x2 blocks. Returns
+-- the shaded grid, or nil if the attempt got stuck with a 2x2 left.
+-- (Before 1.6.0 the border ring was always shaded and the dig was
+-- validated only at the end, rejecting most attempts at 8x8.)
+local function buildShape(n)
+    local shaded = {}
+    for r = 1, n do
+        shaded[r] = {}
+        for c = 1, n do shaded[r][c] = true end
+    end
+    local target = math.floor(n * n * (0.42 + math.random() * 0.18))
+    local cr, cc = math.floor(n / 2) + 1, math.floor(n / 2) + 1
+    shaded[cr][cc] = false
+    local count = 1
+    local refused = {}
+    for r = 1, n do refused[r] = {} end
+
+    local function inBlock(r, c)
+        for dr = -1, 0 do for dc = -1, 0 do
+            local r0, c0 = r + dr, c + dc
+            if r0 >= 1 and r0 < n and c0 >= 1 and c0 < n
+                and shaded[r0][c0] and shaded[r0 + 1][c0]
+                and shaded[r0][c0 + 1] and shaded[r0 + 1][c0 + 1] then
+                return true
+            end
+        end end
+        return false
+    end
+
+    while true do
+        local need_block = count >= target
+        if need_block and not has2x2Shaded(shaded, n) then return shaded end
+        local cand, cand_block = {}, {}
+        for r = 1, n do for c = 1, n do
+            if shaded[r][c] and not refused[r][c] then
+                local touches = false
+                for _, d in ipairs(DIRS) do
+                    local nr, nc = r + d[1], c + d[2]
+                    if nr >= 1 and nr <= n and nc >= 1 and nc <= n and not shaded[nr][nc] then
+                        touches = true
+                    end
+                end
+                if touches then
+                    cand[#cand + 1] = { r, c }
+                    if need_block and inBlock(r, c) then cand_block[#cand_block + 1] = { r, c } end
+                end
+            end
+        end end
+        if #cand_block > 0 then cand = cand_block end
+        if #cand == 0 then return nil end
+        local pick = cand[math.random(#cand)]
+        local r, c = pick[1], pick[2]
+        shaded[r][c] = false
+        if allShadedConnected(shaded, n) and allShadedTouchBorder(shaded, n) then
+            count = count + 1
+        else
+            shaded[r][c] = true
+            refused[r][c] = true
+        end
+    end
+end
+
+-- 1.6.0: start from every clear cell numbered (always solvable at tier 1)
+-- and remove clues one at a time in random order, keeping a removal only
+-- if the level's deductions still fill in the whole grid. Before, a flat
+-- share of clues was drawn at random and only all-but-full sets ever
+-- proved unique, so every difficulty ended up nearly fully numbered.
+-- on_progress(fraction), optional: called after every dig step
 -- (screen.lua wires it to the shared "Generating puzzle…" bar).
 function CaveBoard:generate(difficulty, on_progress)
     self.difficulty = difficulty or self.difficulty
-    local checks = 0
+    local level = LEVELS[self.difficulty] or LEVELS.medium
     local n = self.n
 
-    local keep_clues
-    if self.difficulty == "easy" then
-        keep_clues = 0.6
-    elseif self.difficulty == "hard" then
-        keep_clues = 0.2
-    else
-        keep_clues = 0.4
+    local shaded
+    for _ = 1, 50 do
+        shaded = buildShape(n)
+        if shaded then break end
     end
-
-    local max_attempts = 50
-    local ok = false
-    local node_budget = NODE_BUDGET
-
-    local best_solution, best_clues
-
-    for _attempt = 1, max_attempts do
-        -- Start with all cells shaded
-        local shaded = {}
+    if not shaded then
+        -- Never reached in practice (the repair pass makes every attempt
+        -- valid); a plain ring keeps the board playable regardless.
+        shaded = {}
         for r = 1, n do
             shaded[r] = {}
-            for c = 1, n do shaded[r][c] = true end
+            for c = 1, n do shaded[r][c] = isBorder(r, c, n) end
         end
-
-        -- Excavate interior cells starting from center
-        local cr = math.floor(n / 2) + 1
-        local cc = math.floor(n / 2) + 1
-
-        -- Decide how many interior cells to unshade
-        local interior_n = (n - 2) * (n - 2)
-        local target_unshaded = math.floor(interior_n * (0.35 + math.random() * 0.25))
-        target_unshaded = math.max(target_unshaded, 2)
-
-        -- BFS excavation from center
-        shaded[cr][cc] = false
-        local frontier = { {cr, cc} }
-        local unshaded_count = 1
-        local visited = {}
-        local function vkey(r, c) return r * 100 + c end
-        visited[vkey(cr, cc)] = true
-
-        local iter_limit = target_unshaded * 10
-        local iters = 0
-        while unshaded_count < target_unshaded and #frontier > 0 do
-            iters = iters + 1
-            if iters > iter_limit then break end
-
-            local idx = math.random(#frontier)
-            local cell = frontier[idx]
-            local r, c = cell[1], cell[2]
-
-            -- Try expanding to a neighbor
-            local neighbors = {}
-            for _, d in ipairs(DIRS) do
-                local nr, nc = r + d[1], c + d[2]
-                if nr >= 2 and nr <= n-1 and nc >= 2 and nc <= n-1 then
-                    local k = vkey(nr, nc)
-                    if not visited[k] and shaded[nr][nc] then
-                        neighbors[#neighbors + 1] = {nr, nc}
-                    end
-                end
-            end
-
-            if #neighbors == 0 then
-                -- Remove from frontier
-                table.remove(frontier, idx)
-            else
-                local nb = neighbors[math.random(#neighbors)]
-                local nr, nc = nb[1], nb[2]
-                -- Un-shading a cell can only clear 2x2-shaded violations, never
-                -- create one, so no per-step check is needed here — the final
-                -- has2x2Shaded(shaded, n) check below (after excavation stops)
-                -- is what actually gates acceptance of the whole attempt.
-                shaded[nr][nc] = false
-                local k = vkey(nr, nc)
-                visited[k] = true
-                frontier[#frontier + 1] = {nr, nc}
-                unshaded_count = unshaded_count + 1
-            end
-        end
-
-        -- Repair pass: the random-walk excavation above rarely reaches every
-        -- interior cell (especially ones near a corner/edge, far from the
-        -- center start point), so 2x2-shaded violations against the border
-        -- ring are common at this point. Every such violation must include
-        -- at least one interior cell (the border ring is only 1 cell thick),
-        -- so unshading one interior cell per violating block always resolves
-        -- it; a single raster-order pass fixes all of them since unshading
-        -- only ever removes violations, never creates new ones.
-        for r = 1, n - 1 do
-            for c = 1, n - 1 do
-                if shaded[r][c] and shaded[r+1][c] and shaded[r][c+1] and shaded[r+1][c+1] then
-                    for _, pos in ipairs({{r,c},{r+1,c},{r,c+1},{r+1,c+1}}) do
-                        local pr, pc = pos[1], pos[2]
-                        if pr >= 2 and pr <= n-1 and pc >= 2 and pc <= n-1 then
-                            shaded[pr][pc] = false
-                            unshaded_count = unshaded_count + 1
-                            break
-                        end
-                    end
-                end
-            end
-        end
-
-        -- Validate constraints
-        if not has2x2Shaded(shaded, n)
-            and allUnshadedConnected(shaded, n)
-            and allShadedConnected(shaded, n)
-            and allShadedTouchBorder(shaded, n)
-            and unshaded_count >= 2
-        then
-            -- Temporarily apply this shape so computeVisibility (which
-            -- reads self.solution) reflects it while building candidate
-            -- clue sets below.
-            for r = 1, n do
-                for c = 1, n do
-                    self.solution[r][c] = shaded[r][c]
-                end
-            end
-
-            local clue_candidates = {}
-            for r = 1, n do
-                for c = 1, n do
-                    if not shaded[r][c] then
-                        clue_candidates[#clue_candidates + 1] = {r, c}
-                    end
-                end
-            end
-
-            for _, mult in ipairs(REVEAL_LEVELS) do
-                if ok then break end
-                local keep = math.min(#clue_candidates, math.max(2, math.floor(#clue_candidates * keep_clues * mult)))
-                local sub_attempts = keep >= #clue_candidates and 1 or 2
-                for _ = 1, sub_attempts do
-                    if ok then break end
-                    grid_utils.shuffle(clue_candidates)
-                    local candidate_clues = {}
-                    for r = 1, n do candidate_clues[r] = {} end
-                    for i = 1, keep do
-                        local r, c = clue_candidates[i][1], clue_candidates[i][2]
-                        candidate_clues[r][c] = self:computeVisibility(r, c)
-                    end
-
-                    if not best_clues then
-                        best_solution, best_clues = shaded, candidate_clues
-                    end
-
-                    local solutions, exhausted = countSolutions(candidate_clues, n, 2, node_budget)
-                    checks = checks + 1
-                    if on_progress then on_progress(checks / (checks + 3)) end
-                    if solutions == 1 and not exhausted then
-                        for r = 1, n do
-                            for c = 1, n do self.clues[r][c] = candidate_clues[r][c] end
-                        end
-                        ok = true
-                    end
-                end
-            end
-
-            if ok then
-                -- Reset user grid
-                for r = 1, n do
-                    for c = 1, n do self.user[r][c] = 0 end
-                end
-                break
-            end
+    end
+    for r = 1, n do
+        for c = 1, n do
+            self.solution[r][c] = shaded[r][c]
+            self.user[r][c] = 0
         end
     end
 
-    if not ok and best_clues then
-        for r = 1, n do
-            for c = 1, n do
-                self.solution[r][c] = best_solution[r][c]
-                self.clues[r][c]    = best_clues[r][c]
-                self.user[r][c]     = 0
+    local cells, full = {}, {}
+    for r = 1, n do
+        full[r] = {}
+        for c = 1, n do
+            if not shaded[r][c] then
+                full[r][c] = self:computeVisibility(r, c)
+                cells[#cells + 1] = { r, c }
             end
         end
-        ok = true
     end
-
-    if not ok then
-        -- Fallback: simple ring pattern
+    local keep_min = math.ceil(#cells * level.floor)
+    local tries = level.tries[n - 5] or 1
+    local steps, done = #cells * tries, 0
+    local best, best_left, best_necks
+    for _ = 1, tries do
+        local clues = {}
         for r = 1, n do
-            for c = 1, n do
-                self.solution[r][c] = isBorder(r, c, n)
-                self.clues[r][c]    = nil
-                self.user[r][c]     = 0
+            clues[r] = {}
+            for c = 1, n do clues[r][c] = full[r][c] end
+        end
+        grid_utils.shuffle(cells)
+        local left = #cells
+        for _, cell in ipairs(cells) do
+            done = done + 1
+            if left > keep_min then
+                local r, c = cell[1], cell[2]
+                local v = clues[r][c]
+                clues[r][c] = nil
+                if deduce(clues, n, level.tier) then
+                    left = left - 1
+                else
+                    clues[r][c] = v
+                end
+                if on_progress then on_progress(done / steps) end
             end
         end
-        -- Add one clue in the center
-        local cr2 = math.ceil(n / 2)
-        local cc2 = math.ceil(n / 2)
-        self.clues[cr2][cc2] = self:computeVisibility(cr2, cc2)
+        local _, stats = deduce(clues, n, level.tier)
+        local necks = stats.uses[3]
+        if not best or left < best_left or (left == best_left and necks > best_necks) then
+            best, best_left, best_necks = clues, left, necks
+        end
+    end
+    local clues = best
+    for r = 1, n do
+        for c = 1, n do self.clues[r][c] = clues[r][c] end
     end
 end
 
@@ -740,4 +906,6 @@ return {
     CaveBoard      = CaveBoard,
     SIZES          = SIZES,
     countSolutions = countSolutions, -- exposed for the specs
+    deduce         = deduce,
+    LEVELS         = LEVELS,
 }

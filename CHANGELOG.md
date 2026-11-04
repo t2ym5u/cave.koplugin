@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-11-04
+
+### Changed
+- Difficulty levels now really differ. Puzzles are built by starting from a
+  fully numbered grid and removing numbers one by one, keeping a removal
+  only if the grid can still be solved by pure reasoning. Easy keeps about
+  80 % of the white cells numbered, Medium about 60 %, Hard about 40 %
+  (before, Hard ended up with almost every white cell numbered, like
+  Medium).
+- No guessing needed at any level: every puzzle can be finished with the
+  number rays, the 2×2 rule and "this cell can no longer join its colour".
+  Hard may also need bottlenecks: a cell that must stay white (or black)
+  because changing it would split the cave in two, or cut black cells
+  off from the edge.
+- The cave can now reach the edge of the grid, so the border is no longer
+  always black.
+- All puzzles differ from 1.5.x for the same seed (Daily Challenge
+  included); generation still takes at most a few hundredths of a second
+  on a desktop (well under a second on a Kobo).
+
+### Fixed
+- The uniqueness check required all black cells to form one single group,
+  which is stricter than the rules shown in the game (each black cell only
+  has to reach the edge). Some puzzles (up to about 1 in 8 at 6×6) could
+  therefore be solved in a second way that the game rejected.
+
 ## [1.5.0] - 2026-11-04
 
 ### Changed
